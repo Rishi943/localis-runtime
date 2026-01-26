@@ -208,9 +208,32 @@ Write-Step "Step 5: Installing Python dependencies"
 Write-Host "Reading requirements from: $REQUIREMENTS_FILE" -ForegroundColor Yellow
 Write-Host ""
 
-# Install each package using bundled Python
+# Filter out llama-cpp-python to avoid source builds requiring VS build tools
+Write-Host "Filtering requirements (excluding llama-cpp-python)..." -ForegroundColor Yellow
+$filteredRequirements = @()
+$requirementLines = Get-Content $REQUIREMENTS_FILE
+foreach ($line in $requirementLines) {
+    $trimmedLine = $line.Trim()
+    # Skip blank lines, comments, and llama-cpp-python
+    if ($trimmedLine -eq "" -or $trimmedLine.StartsWith("#")) {
+        continue
+    }
+    if ($trimmedLine -match "^llama-cpp-python") {
+        Write-Host "  Skipping: $trimmedLine (will install from wheel)" -ForegroundColor Gray
+        continue
+    }
+    $filteredRequirements += $line
+}
+
+# Write filtered requirements to temp file
+$filteredReqFile = "$DIST_DIR\requirements.filtered.txt"
+$filteredRequirements | Out-File -FilePath $filteredReqFile -Encoding ascii
+Write-Host "Filtered requirements written to: $filteredReqFile" -ForegroundColor Gray
+Write-Host ""
+
+# Install filtered requirements using bundled Python
 Write-Host "Installing dependencies (this may take several minutes)..." -ForegroundColor Yellow
-& $pythonExe -m pip install -r $REQUIREMENTS_FILE --no-warn-script-location --disable-pip-version-check
+& $pythonExe -m pip install -r $filteredReqFile --no-warn-script-location --disable-pip-version-check
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Failed to install dependencies" -ForegroundColor Red
@@ -218,9 +241,62 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "All dependencies installed successfully!" -ForegroundColor Green
+Write-Host "Base dependencies installed successfully!" -ForegroundColor Green
 
-# TODO: Verify critical packages are installed
+# Install llama-cpp-python from prebuilt wheel
+Write-Host ""
+Write-Host "Installing llama-cpp-python from prebuilt wheel..." -ForegroundColor Yellow
+
+$llamaWheel = $env:LOCALIS_LLAMA_WHEEL
+if (-not $llamaWheel) {
+    Write-Host "ERROR: LOCALIS_LLAMA_WHEEL environment variable not set" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "llama-cpp-python cannot be built from source on clean Windows" -ForegroundColor Yellow
+    Write-Host "without Visual Studio build tools and cmake." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Please set LOCALIS_LLAMA_WHEEL to a prebuilt wheel:" -ForegroundColor Yellow
+    Write-Host "  1. URL to .whl file:" -ForegroundColor Cyan
+    Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "https://github.com/.../llama_cpp_python-0.x.x-cp312-win_amd64.whl"' -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  2. Local path to .whl file:" -ForegroundColor Cyan
+    Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "C:\wheels\llama_cpp_python-0.x.x-cp312-win_amd64.whl"' -ForegroundColor Cyan
+    Write-Host ""
+    exit 1
+}
+
+Write-Host "Wheel source: $llamaWheel" -ForegroundColor Gray
+
+# Check if URL or local path
+if ($llamaWheel -match "^https?://") {
+    # Download from URL
+    $wheelFile = "$DIST_DIR\llama_cpp_python.whl"
+    Write-Host "Downloading wheel from URL..." -ForegroundColor Yellow
+    Download-File -Url $llamaWheel -OutputPath $wheelFile
+    $wheelToInstall = $wheelFile
+}
+else {
+    # Local path
+    if (-not (Test-Path $llamaWheel)) {
+        Write-Host "ERROR: Wheel file not found at: $llamaWheel" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "Using local wheel file" -ForegroundColor Gray
+    $wheelToInstall = $llamaWheel
+}
+
+# Install the wheel
+Write-Host "Installing llama-cpp-python wheel..." -ForegroundColor Yellow
+& $pythonExe -m pip install $wheelToInstall --no-warn-script-location --disable-pip-version-check
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: Failed to install llama-cpp-python wheel" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ""
+Write-Host "llama-cpp-python installed successfully!" -ForegroundColor Green
+
+# Verify critical packages are installed
 Write-Host ""
 Write-Host "Verifying critical packages..." -ForegroundColor Yellow
 $criticalPackages = @("uvicorn", "fastapi", "llama-cpp-python")
