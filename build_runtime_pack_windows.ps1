@@ -239,7 +239,7 @@ Write-Host ""
 Write-Host "Preflight: Checking binary wheel availability..." -ForegroundColor Yellow
 $wheelhouseDir = Join-Path $DIST_DIR "wheelhouse"
 New-Item -ItemType Directory -Path $wheelhouseDir -Force | Out-Null
-& $pythonExe -m pip download -r $filteredReqFile -d $wheelhouseDir --only-binary=:all: --prefer-binary --no-deps --disable-pip-version-check --no-warn-script-location
+& $pythonExe -m pip download -r $filteredReqFile -d $wheelhouseDir --only-binary=:all: --prefer-binary --no-deps --disable-pip-version-check
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Preflight check failed - one or more dependencies lack binary wheels" -ForegroundColor Red
