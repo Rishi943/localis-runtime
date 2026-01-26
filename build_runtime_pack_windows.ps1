@@ -254,43 +254,83 @@ if (-not $llamaWheel) {
     Write-Host "llama-cpp-python cannot be built from source on clean Windows" -ForegroundColor Yellow
     Write-Host "without Visual Studio build tools and cmake." -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "Please set LOCALIS_LLAMA_WHEEL to a prebuilt wheel:" -ForegroundColor Yellow
-    Write-Host "  1. URL to .whl file:" -ForegroundColor Cyan
+    Write-Host "Please set LOCALIS_LLAMA_WHEEL to one of the following:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  1. Official index (CPU-only):" -ForegroundColor Cyan
+    Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "INDEX_CPU"' -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  2. Official index (CUDA):" -ForegroundColor Cyan
+    Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "INDEX_CUDA_cu121"  # or cu122, cu123, cu124, cu125' -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  3. URL to .whl file:" -ForegroundColor Cyan
     Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "https://github.com/.../llama_cpp_python-0.x.x-cp312-win_amd64.whl"' -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  2. Local path to .whl file:" -ForegroundColor Cyan
+    Write-Host "  4. Local path to .whl file:" -ForegroundColor Cyan
     Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "C:\wheels\llama_cpp_python-0.x.x-cp312-win_amd64.whl"' -ForegroundColor Cyan
     Write-Host ""
     exit 1
 }
 
-Write-Host "Wheel source: $llamaWheel" -ForegroundColor Gray
+# Check if special index value, URL, or local path
+if ($llamaWheel -eq "INDEX_CPU") {
+    # Install from official CPU index
+    Write-Host "Wheel source: INDEX_CPU (official index)" -ForegroundColor Gray
+    Write-Host "Installing llama-cpp-python from CPU index..." -ForegroundColor Yellow
+    & $pythonExe -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu --no-warn-script-location --disable-pip-version-check
 
-# Check if URL or local path
-if ($llamaWheel -match "^https?://") {
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: Failed to install llama-cpp-python from CPU index" -ForegroundColor Red
+        exit 1
+    }
+}
+elseif ($llamaWheel -match "^INDEX_CUDA_(cu\d+)$") {
+    # Install from official CUDA index
+    $cudaSuffix = $matches[1]
+    Write-Host "Wheel source: INDEX_CUDA_$cudaSuffix (official index)" -ForegroundColor Gray
+    Write-Host "Installing llama-cpp-python from CUDA $cudaSuffix index..." -ForegroundColor Yellow
+    $indexUrl = "https://abetlen.github.io/llama-cpp-python/whl/$cudaSuffix"
+    & $pythonExe -m pip install llama-cpp-python --extra-index-url $indexUrl --no-warn-script-location --disable-pip-version-check
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: Failed to install llama-cpp-python from CUDA $cudaSuffix index" -ForegroundColor Red
+        exit 1
+    }
+}
+elseif ($llamaWheel -match "^https?://") {
     # Download from URL
+    Write-Host "Wheel source: $llamaWheel" -ForegroundColor Gray
     $wheelFile = "$DIST_DIR\llama_cpp_python.whl"
     Write-Host "Downloading wheel from URL..." -ForegroundColor Yellow
     Download-File -Url $llamaWheel -OutputPath $wheelFile
     $wheelToInstall = $wheelFile
+
+    # Install the wheel
+    Write-Host "Installing llama-cpp-python wheel..." -ForegroundColor Yellow
+    & $pythonExe -m pip install $wheelToInstall --no-warn-script-location --disable-pip-version-check
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: Failed to install llama-cpp-python wheel" -ForegroundColor Red
+        exit 1
+    }
 }
 else {
     # Local path
+    Write-Host "Wheel source: $llamaWheel" -ForegroundColor Gray
     if (-not (Test-Path $llamaWheel)) {
         Write-Host "ERROR: Wheel file not found at: $llamaWheel" -ForegroundColor Red
         exit 1
     }
     Write-Host "Using local wheel file" -ForegroundColor Gray
     $wheelToInstall = $llamaWheel
-}
 
-# Install the wheel
-Write-Host "Installing llama-cpp-python wheel..." -ForegroundColor Yellow
-& $pythonExe -m pip install $wheelToInstall --no-warn-script-location --disable-pip-version-check
+    # Install the wheel
+    Write-Host "Installing llama-cpp-python wheel..." -ForegroundColor Yellow
+    & $pythonExe -m pip install $wheelToInstall --no-warn-script-location --disable-pip-version-check
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: Failed to install llama-cpp-python wheel" -ForegroundColor Red
-    exit 1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: Failed to install llama-cpp-python wheel" -ForegroundColor Red
+        exit 1
+    }
 }
 
 Write-Host ""
