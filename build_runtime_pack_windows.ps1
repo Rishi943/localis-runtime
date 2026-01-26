@@ -169,8 +169,8 @@ if (Test-Path $pthFile) {
         "import site"
     )
 
-    # Write patched content
-    $newContent | Out-File -FilePath $pthFile -Encoding utf8 -Force
+    # Write patched content (UTF-8 without BOM)
+    [System.IO.File]::WriteAllLines($pthFile, $newContent, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "python$pyTag._pth patched successfully!" -ForegroundColor Green
     Write-Host "  - Added: Lib\site-packages" -ForegroundColor Gray
     Write-Host "  - Added: import site" -ForegroundColor Gray
@@ -229,9 +229,9 @@ foreach ($line in $requirementLines) {
     $filteredRequirements += $line
 }
 
-# Write filtered requirements to temp file
+# Write filtered requirements to temp file (UTF-8 without BOM)
 $filteredReqFile = "$DIST_DIR\requirements.filtered.txt"
-$filteredRequirements | Out-File -FilePath $filteredReqFile -Encoding utf8
+[System.IO.File]::WriteAllLines($filteredReqFile, $filteredRequirements, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "Filtered requirements written to: $filteredReqFile" -ForegroundColor Gray
 Write-Host ""
 
