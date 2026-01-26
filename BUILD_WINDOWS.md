@@ -1,379 +1,425 @@
-# Building and Running LocalMind on Windows
+# Running LocalMind on Windows
 
-This document covers running and packaging the LocalMind Windows launcher.
+This document covers running LocalMind on Windows using the bundled runtime pack.
 
-## Prerequisites
+## For End Users
 
-### Required
+**No installation required!** LocalMind comes with everything you need - no need to install Python, pip, Visual Studio Build Tools, cmake, or uvicorn.
 
-- **Python 3.8 or higher** (Python 3.10+ recommended)
-  - Download from [python.org](https://www.python.org/downloads/)
-  - Ensure "Add Python to PATH" is checked during installation
-  - Verify: `python --version`
+### Quick Start
 
-- **pip** (included with Python)
-  - Verify: `pip --version`
+1. **Download and Extract**
+   - Download `LocalisRuntimePack.zip`
+   - Extract to a folder (e.g., `C:\LocalMind`)
 
-### Optional
+2. **Configure Repository**
+   - Copy `localis_runtime_config.json.example` to `localis_runtime_config.json`
+   - Edit the file and set your repository URL:
+     ```json
+     {
+       "app_repo_url": "https://github.com/yourusername/localis.git",
+       "app_branch": "release"
+     }
+     ```
 
-- **Git** (for cloning the application repository)
-  - Download from [git-scm.com](https://git-scm.com/download/win)
-  - Verify: `git --version`
-  - **Alternative**: Can use bundled portable Git (see Installation Structure below)
+3. **Run the Launcher**
+   - Double-click `launcher_windows.py` (or run via command prompt)
+   - The launcher will:
+     - Clone the application repository
+     - Start the local server
+     - Open your browser automatically
 
-### Python Dependencies
+4. **Enjoy!**
+   - Application runs at `http://127.0.0.1:8000`
+   - Press `Ctrl+C` in the console to stop
 
-For script usage:
-```bash
-pip install uvicorn
-```
+### What's Included
 
-For packaging:
-```bash
-pip install pyinstaller
-```
+The runtime pack contains:
+- **launcher_windows.py**: Bootstrap launcher
+- **runtime\python\**: Embeddable Python 3.12 with all dependencies
+- **runtime\git\**: Portable Git for repository management
+- **localis_runtime_config.json.example**: Configuration template
 
-## Installation Structure
+### Installation Location
 
 LocalMind installs to: **`%LOCALAPPDATA%\Localis`**
 
 Typical path: `C:\Users\<YourUsername>\AppData\Local\Localis`
 
-### Directory Layout
+#### Directory Layout
 
 ```
 %LOCALAPPDATA%\Localis\
-├── app\              # Git repository clone (application code)
-├── models\           # GGUF model files (user-managed)
+├── app\              # Cloned application repository (auto-updated)
+├── models\           # Place your GGUF model files here
 ├── data\             # SQLite database, user data
-├── runtime\          # Optional bundled dependencies
-│   └── git\          # Optional portable Git
-│       └── bin\
-│           └── git.exe
+├── runtime\          # Can copy runtime here for portability
 └── logs\             # Application logs
 ```
 
-## Running as a Script (Development/Testing)
+### Configuration Options
 
-### 1. Set Required Environment Variables
+Edit `localis_runtime_config.json` for custom settings:
 
-The launcher requires the repository URL. Open Command Prompt or PowerShell:
+```json
+{
+  "app_repo_url": "https://github.com/yourusername/localis.git",
+  "app_branch": "release",
+  "host": "127.0.0.1",
+  "port": 8000,
+  "install_root": "C:\\Users\\YourUsername\\AppData\\Local\\Localis"
+}
+```
+
+**Configuration Priority**: Environment variables override config file values.
+
+#### Optional Environment Variables
+
+For advanced users, you can override config via environment variables:
 
 ```cmd
-REM Set repository URL (required)
-set LOCALIS_APP_REPO_URL=https://github.com/yourusername/localis.git
-
-REM Set branch (optional, defaults to 'release')
+set LOCALIS_APP_REPO_URL=https://github.com/user/localis.git
 set LOCALIS_APP_BRANCH=main
-
-REM Run the launcher
-python launcher_windows.py
-```
-
-Or in PowerShell:
-
-```powershell
-# Set repository URL (required)
-$env:LOCALIS_APP_REPO_URL = "https://github.com/yourusername/localis.git"
-
-# Set branch (optional, defaults to 'release')
-$env:LOCALIS_APP_BRANCH = "main"
-
-# Run the launcher
-python launcher_windows.py
-```
-
-### 2. Optional Configuration
-
-Override default installation location:
-```cmd
+set LOCALIS_HOST=127.0.0.1
+set LOCALIS_PORT=8080
 set LOCALIS_INSTALL_ROOT=D:\MyApps\Localis
 ```
 
-Override server host/port:
-```cmd
-set LOCALIS_HOST=0.0.0.0
-set LOCALIS_PORT=8080
-```
+### Automatic Updates
 
-### 3. First Run Behavior
+The launcher automatically updates the application on each run:
+- If the repository exists: runs `git fetch`, `git checkout <branch>`, `git pull --ff-only`
+- If the repository doesn't exist: clones it fresh
 
-On first run, the launcher will:
-1. Create directory structure in `%LOCALAPPDATA%\Localis`
-2. Clone the repository to `app\` subdirectory
-3. Launch the uvicorn server
-4. Open your default browser to `http://127.0.0.1:8000`
+To disable updates (for development), manually manage the repository in `%LOCALAPPDATA%\Localis\app`.
 
-### 4. Stopping the Server
+### Adding Models
 
-Press `Ctrl+C` in the terminal to stop the server gracefully.
-
-## Packaging with PyInstaller
-
-### Recommended Approach (v1): One-Directory Build
-
-This creates a folder with the executable and dependencies.
-
-#### 1. Install PyInstaller
-
-```bash
-pip install pyinstaller
-```
-
-#### 2. Create the Package
-
-```bash
-pyinstaller --onedir --name LocalMind --console launcher_windows.py
-```
-
-Options explained:
-- `--onedir`: Creates a folder (easier to bundle runtime dependencies)
-- `--name LocalMind`: Output name
-- `--console`: Shows console window (helpful for debugging)
-
-#### 3. Output Location
-
-The executable will be in:
-```
-dist\LocalMind\
-├── LocalMind.exe       # Main executable
-├── _internal\          # Python runtime and dependencies
-└── ...
-```
-
-#### 4. Distribution
-
-Distribute the entire `dist\LocalMind\` folder. Users run `LocalMind.exe`.
-
-### Advanced: One-File Build (v2)
-
-For a single executable (slower startup):
-
-```bash
-pyinstaller --onefile --name LocalMind --console launcher_windows.py
-```
-
-Output: `dist\LocalMind.exe`
-
-### Bundling Portable Git (Optional)
-
-If you want to bundle Git with your distribution:
-
-1. Download PortableGit from [git-scm.com](https://git-scm.com/download/win)
-2. Extract to `dist\LocalMind\runtime\git\`
-3. Ensure `git.exe` is at `dist\LocalMind\runtime\git\bin\git.exe`
-
-The launcher will automatically detect and use bundled Git.
-
-## Environment Variable Configuration
-
-### For Script Usage
-
-Create a batch file (e.g., `launch_localis.bat`):
-
-```batch
-@echo off
-set LOCALIS_APP_REPO_URL=https://github.com/yourusername/localis.git
-set LOCALIS_APP_BRANCH=release
-python launcher_windows.py
-pause
-```
-
-### For Packaged Executable
-
-Create a batch file (e.g., `LocalMind.bat`) next to the executable:
-
-```batch
-@echo off
-set LOCALIS_APP_REPO_URL=https://github.com/yourusername/localis.git
-set LOCALIS_APP_BRANCH=release
-LocalMind.exe
-pause
-```
-
-Or set system-wide environment variables:
-1. Open System Properties → Advanced → Environment Variables
-2. Add `LOCALIS_APP_REPO_URL` under User variables
-3. Optionally add `LOCALIS_APP_BRANCH`
-
-## Test Checklist
-
-### Test 1: First Install
-
-**Goal**: Verify clean installation and initial clone.
-
-1. Delete `%LOCALAPPDATA%\Localis` if it exists
-2. Set `LOCALIS_APP_REPO_URL` environment variable
-3. Run launcher (script or packaged)
-4. **Expected**:
-   - Directories created in `%LOCALAPPDATA%\Localis`
-   - Repository cloned to `app\`
-   - Server starts successfully
-   - Browser opens to application
-   - Console shows "Repository cloned successfully"
-
-### Test 2: Rerun (Repository Already Exists)
-
-**Goal**: Verify launcher skips cloning on subsequent runs.
-
-1. Close the server (Ctrl+C)
-2. Run launcher again
-3. **Expected**:
-   - No cloning occurs
-   - Console shows "Repository already cloned at: ..."
-   - Server starts immediately
-   - Browser opens again
-
-### Test 3: Update via Git Pull
-
-**Goal**: Verify application updates work.
-
-1. Stop the server
-2. Manually update the repository:
-   ```cmd
-   cd %LOCALAPPDATA%\Localis\app
-   git pull origin release
-   ```
-3. Run launcher again
-4. **Expected**:
-   - Updated code is used
-   - Server runs with latest changes
-
-**Future Enhancement**: Add auto-update support to launcher.
-
-### Test 4: Persistence of Models and Data
-
-**Goal**: Verify user data persists across runs.
-
-1. Run the application
-2. Place a GGUF model file in `%LOCALAPPDATA%\Localis\models\`
-3. Complete the tutorial (creates `chat_history.db` in `data\`)
-4. Have a conversation (adds messages to database)
-5. Stop the server
-6. Run launcher again
-7. **Expected**:
-   - Model still present in `models\`
-   - Database still present in `data\`
-   - Chat history loads correctly
-   - Tutorial completion status preserved
-
-### Test 5: Custom Install Root
-
-**Goal**: Verify custom installation directory works.
-
-1. Set `LOCALIS_INSTALL_ROOT=C:\CustomLocalis`
-2. Run launcher
-3. **Expected**:
-   - Installation occurs in `C:\CustomLocalis`
-   - All subdirectories created there
-   - Application runs normally
-
-### Test 6: Git Not in PATH (Bundled Git)
-
-**Goal**: Verify bundled Git fallback works.
-
-1. Temporarily rename/remove Git from PATH
-2. Place portable Git at `%LOCALAPPDATA%\Localis\runtime\git\bin\git.exe`
-3. Run launcher with clean install
-4. **Expected**:
-   - Console shows "Found bundled git at: ..."
-   - Repository clones successfully using bundled Git
-
-### Test 7: Error Handling - Missing Repository URL
-
-**Goal**: Verify clear error message when LOCALIS_APP_REPO_URL not set.
-
-1. Unset `LOCALIS_APP_REPO_URL`
-2. Run launcher
-3. **Expected**:
-   - Clear error message displayed
-   - Instructions on how to set the variable
-   - Launcher exits gracefully
-
-### Test 8: Error Handling - No Git Available
-
-**Goal**: Verify clear error when Git is unavailable.
-
-1. Remove Git from PATH
-2. Ensure no bundled Git at runtime location
-3. Run launcher
-4. **Expected**:
-   - Clear error message about missing Git
-   - Instructions to install Git or use bundled Git
-   - Launcher exits gracefully
+1. Download GGUF model files (e.g., from Hugging Face)
+2. Place them in: `%LOCALAPPDATA%\Localis\models\`
+3. The application will detect them automatically
 
 ## Troubleshooting
 
-### Issue: "LOCALIS_APP_REPO_URL environment variable is required"
+### Issue: "Runtime payload missing"
 
-**Solution**: Set the environment variable before running:
-```cmd
-set LOCALIS_APP_REPO_URL=https://github.com/yourusername/localis.git
+**Error Message**:
+```
+ERROR: Runtime payload missing
+The bundled Python runtime is required but not found.
 ```
 
-### Issue: "Git executable not found"
+**Cause**: The `runtime\python\` folder is missing or incomplete.
 
-**Solution**: Either:
-1. Install Git and add to PATH: [git-scm.com](https://git-scm.com/download/win)
-2. Place portable Git at `%LOCALAPPDATA%\Localis\runtime\git\bin\git.exe`
+**Solution**:
+1. Ensure you extracted the complete zip file
+2. Verify `runtime\python\python.exe` exists in the launcher directory
+3. Re-download the runtime pack if corrupted
 
-### Issue: "Failed to start server" / "uvicorn not found"
+---
 
-**Solution**: Install uvicorn in the repository:
-```bash
-cd %LOCALAPPDATA%\Localis\app
-pip install -r requirements.txt
+### Issue: "Git not found"
+
+**Error Message**:
+```
+ERROR: Git not found
+Git is required to download the application.
 ```
 
-### Issue: Application runs but shows errors about missing models
+**Cause**: The `runtime\git\` folder is missing.
 
-**Solution**: Place GGUF model files in `%LOCALAPPDATA%\Localis\models\`
+**Solution**:
+1. Ensure `runtime\git\bin\git.exe` exists in the launcher directory
+2. Or install Git system-wide: [git-scm.com](https://git-scm.com/download/win)
+3. Re-download the runtime pack if needed
 
-### Issue: Browser doesn't open automatically
+---
 
-**Solution**: Manually navigate to `http://127.0.0.1:8000` in your browser.
+### Issue: Failed to clone repository
+
+**Error Message**:
+```
+ERROR: Failed to clone repository
+```
+
+**Possible Causes**:
+- Invalid repository URL in config file
+- Network connectivity issues
+- Private repository requiring authentication
+
+**Solutions**:
+
+1. **Check repository URL**:
+   - Verify the URL in `localis_runtime_config.json`
+   - Ensure it ends with `.git`
+   - Example: `https://github.com/user/localis.git`
+
+2. **For private repositories**:
+   - Use HTTPS URL with personal access token:
+     ```
+     https://username:TOKEN@github.com/user/localis.git
+     ```
+   - Or use SSH URL (requires SSH key setup):
+     ```
+     git@github.com:user/localis.git
+     ```
+
+3. **Check network**:
+   - Ensure internet connection is active
+   - Try cloning manually to verify access:
+     ```cmd
+     cd %LOCALAPPDATA%\Localis
+     git clone https://github.com/user/localis.git app
+     ```
+
+---
 
 ### Issue: Port already in use
 
-**Solution**: Change the port:
-```cmd
-set LOCALIS_PORT=8001
+**Error Message**:
+```
+Address already in use
 ```
 
-## Advanced: Creating an Installer
+**Cause**: Another application is using port 8000.
 
-For future versions, consider using:
-- **Inno Setup**: Create a Windows installer (.exe)
-- **WiX Toolset**: Create an MSI installer
-- **NSIS**: Lightweight installer creator
-
-These can:
-- Create Start Menu shortcuts
-- Set environment variables automatically
-- Handle uninstallation
-- Bundle all dependencies
-
-## Version Control Best Practices
-
-When packaging for distribution:
-
-1. **Tag releases** in git:
-   ```bash
-   git tag -a v1.0.0 -m "Release version 1.0.0"
-   git push origin v1.0.0
+**Solution**:
+1. Change port in `localis_runtime_config.json`:
+   ```json
+   {
+     "port": 8001
+   }
+   ```
+2. Or set environment variable:
+   ```cmd
+   set LOCALIS_PORT=8001
    ```
 
-2. **Use the release branch** for stable builds:
-   - Set `LOCALIS_APP_BRANCH=release` by default
-   - Keep `main` or `develop` for development
+---
 
-3. **Test packaged executables** before distributing:
-   - Run all tests from the checklist
-   - Test on a clean Windows VM if possible
+### Issue: Browser doesn't open automatically
+
+**Cause**: Default browser not configured or system restriction.
+
+**Solution**:
+- Manually open your browser to: `http://127.0.0.1:8000`
+- The application is running even if the browser didn't open
+
+---
+
+### Issue: Application shows errors about missing models
+
+**Cause**: No GGUF model files in the models directory.
+
+**Solution**:
+1. Download a GGUF model file
+2. Place in: `%LOCALAPPDATA%\Localis\models\`
+3. Restart the application
+
+---
+
+### Issue: Failed to update repository (git pull errors)
+
+**Error Message**:
+```
+Failed to update repository
+```
+
+**Cause**: Local changes conflict with remote updates, or branch diverged.
+
+**Solution**:
+1. The launcher continues with existing repository state
+2. Manually fix in `%LOCALAPPDATA%\Localis\app`:
+   ```cmd
+   cd %LOCALAPPDATA%\Localis\app
+   git status
+   git stash  # If you have local changes
+   git pull origin release
+   ```
+
+---
+
+### Issue: Server starts but shows dependency errors
+
+**Cause**: Incomplete or corrupted Python runtime dependencies.
+
+**Solution**:
+1. Delete `%LOCALAPPDATA%\Localis` completely
+2. Re-extract the runtime pack
+3. Run launcher again for fresh installation
+
+---
+
+## For Developers
+
+### Prerequisites (Development Only)
+
+To build the runtime pack or run as a development script:
+
+- **Python 3.10+** installed on your development machine
+- **PowerShell** (for running build script)
+- **Internet connection** (to download embeddable Python and portable Git)
+
+### Running as Development Script
+
+```cmd
+REM Install Python on your dev machine first
+python --version
+
+REM Create a config file
+copy localis_runtime_config.json.example localis_runtime_config.json
+notepad localis_runtime_config.json
+
+REM Run the launcher with your system Python (will still look for bundled runtime)
+python launcher_windows.py
+
+REM Optional: Enable auto-reload for development
+set LOCALIS_DEV_RELOAD=1
+python launcher_windows.py
+```
+
+**Note**: Even in dev mode, the launcher prefers bundled runtime. To use system Python, temporarily rename `runtime\python\` or set launcher to fallback mode.
+
+### Building the Runtime Pack
+
+See `build_runtime_pack_windows.ps1` for the automated build script.
+
+**Quick build**:
+
+```powershell
+# Set path to your local Localis app repo
+$env:LOCALIS_APP_REPO_PATH = "C:\dev\localis"
+
+# Run build script (requires PowerShell 5.1+)
+.\build_runtime_pack_windows.ps1
+
+# Output: dist\LocalisRuntimePack.zip
+```
+
+The script will:
+1. Download Python 3.12 embeddable
+2. Download portable Git
+3. Install Python dependencies from `requirements.txt`
+4. Patch `python312._pth` to enable site-packages
+5. Package everything into a distributable zip
+
+### Development Workflow
+
+1. **Test locally**:
+   ```cmd
+   python launcher_windows.py
+   ```
+
+2. **Build runtime pack**:
+   ```powershell
+   .\build_runtime_pack_windows.ps1
+   ```
+
+3. **Test packaged build**:
+   - Extract `dist\LocalisRuntimePack.zip` to test folder
+   - Run launcher from extracted folder
+   - Verify bundled runtime is used
+
+4. **Distribute**:
+   - Upload `LocalisRuntimePack.zip` for end users
+   - Include setup instructions
+
+### Optional: PyInstaller Packaging
+
+For a standalone executable (not required, but optional):
+
+```bash
+pip install pyinstaller
+pyinstaller --onedir --name LocalMind --console launcher_windows.py
+```
+
+Then manually add `runtime\` folder to `dist\LocalMind\` before distribution.
+
+---
+
+## Test Checklist
+
+### Test 1: Fresh Install with Config File
+
+1. Delete `%LOCALAPPDATA%\Localis`
+2. Place `localis_runtime_config.json` next to launcher with valid repo URL
+3. Run `launcher_windows.py`
+4. **Expected**:
+   - Repository cloned
+   - Server starts with bundled Python
+   - Browser opens
+
+### Test 2: Automatic Repository Update
+
+1. Run launcher (creates initial clone)
+2. Stop server (Ctrl+C)
+3. Run launcher again
+4. **Expected**:
+   - Console shows "Updating repository..."
+   - Shows "git fetch", "git checkout", "git pull"
+   - Server starts with latest code
+
+### Test 3: Bundled Runtime Detection
+
+1. Check console output when launching
+2. **Expected**:
+   - "Using bundled Python at: ...\runtime\python\python.exe"
+   - "Using bundled git at: ...\runtime\git\bin\git.exe"
+   - NOT using system Python
+
+### Test 4: Config File Search Order
+
+1. Create different configs:
+   - `localis_runtime_config.json` next to launcher (port 8001)
+   - `%LOCALAPPDATA%\Localis\localis_runtime_config.json` (port 8002)
+2. Run launcher
+3. **Expected**:
+   - Uses launcher directory config (port 8001 takes precedence)
+
+### Test 5: Environment Variable Override
+
+1. Set in `localis_runtime_config.json`: `"port": 8000`
+2. Set environment variable: `set LOCALIS_PORT=9000`
+3. Run launcher
+4. **Expected**:
+   - Server runs on port 9000 (env var overrides config)
+
+### Test 6: Missing Runtime Payload Error
+
+1. Temporarily rename `runtime\python\` folder
+2. Run launcher
+3. **Expected**:
+   - Clear error: "Runtime payload missing"
+   - Lists expected locations
+   - Exits gracefully
+
+### Test 7: Data Persistence
+
+1. Run application, complete tutorial
+2. Place model in `%LOCALAPPDATA%\Localis\models\`
+3. Stop server
+4. Run launcher again
+5. **Expected**:
+   - Model still present
+   - Tutorial completion status preserved
+   - Database intact
+
+### Test 8: Development Reload Mode
+
+1. Set `LOCALIS_DEV_RELOAD=1`
+2. Run launcher
+3. **Expected**:
+   - Console shows "Development mode: --reload enabled"
+   - Server watches for file changes
+
+---
 
 ## Support
 
-For issues or questions:
-- Check logs in `%LOCALAPPDATA%\Localis\logs\`
-- Review console output for error messages
-- Ensure all prerequisites are met
+For issues:
+1. Check console output for error messages
+2. Review logs in `%LOCALAPPDATA%\Localis\logs\`
+3. Verify `localis_runtime_config.json` is valid JSON
+4. Ensure complete runtime pack extraction
+5. Try fresh install (delete `%LOCALAPPDATA%\Localis` and re-run)
