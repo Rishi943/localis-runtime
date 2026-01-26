@@ -95,11 +95,11 @@ function Expand-ZipFile {
 # ============================================================================
 
 Write-Host ""
-Write-Host "╔═══════════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
-Write-Host "║                                                                                       ║" -ForegroundColor Magenta
-Write-Host "║                    LocalMind Windows Runtime Pack Builder                            ║" -ForegroundColor Magenta
-Write-Host "║                                                                                       ║" -ForegroundColor Magenta
-Write-Host "╚═══════════════════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
+Write-Host "========================================================================================" -ForegroundColor Magenta
+Write-Host "                                                                                        " -ForegroundColor Magenta
+Write-Host "                    LocalMind Windows Runtime Pack Builder                             " -ForegroundColor Magenta
+Write-Host "                                                                                        " -ForegroundColor Magenta
+Write-Host "========================================================================================" -ForegroundColor Magenta
 Write-Host ""
 Write-Host "Configuration:" -ForegroundColor White
 Write-Host "  Python Version: $PYTHON_VERSION" -ForegroundColor Gray
@@ -227,10 +227,10 @@ $criticalPackages = @("uvicorn", "fastapi", "llama-cpp-python")
 foreach ($package in $criticalPackages) {
     & $pythonExe -m pip show $package | Out-Null
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "  ✓ $package" -ForegroundColor Green
+        Write-Host "  [OK] $package" -ForegroundColor Green
     }
     else {
-        Write-Host "  ✗ $package (NOT FOUND)" -ForegroundColor Red
+        Write-Host "  [X] $package (NOT FOUND)" -ForegroundColor Red
     }
 }
 
@@ -274,7 +274,7 @@ $launcherSource = "launcher_windows.py"
 $launcherDest = Join-Path $DIST_DIR "launcher_windows.py"
 if (Test-Path $launcherSource) {
     Copy-Item -Path $launcherSource -Destination $launcherDest -Force
-    Write-Host "✓ Copied: launcher_windows.py" -ForegroundColor Green
+    Write-Host "[OK] Copied: launcher_windows.py" -ForegroundColor Green
 }
 else {
     Write-Host "ERROR: launcher_windows.py not found in current directory" -ForegroundColor Red
@@ -286,7 +286,7 @@ $configSource = "localis_runtime_config.json.example"
 $configDest = Join-Path $DIST_DIR "localis_runtime_config.json"
 if (Test-Path $configSource) {
     Copy-Item -Path $configSource -Destination $configDest -Force
-    Write-Host "✓ Copied: localis_runtime_config.json (from example)" -ForegroundColor Green
+    Write-Host "[OK] Copied: localis_runtime_config.json (from example)" -ForegroundColor Green
     Write-Host "  NOTE: Users must edit this file with their repository URL" -ForegroundColor Yellow
 }
 else {
@@ -339,7 +339,7 @@ Remove-Item $tempZipDir -Recurse -Force
 
 if (Test-Path $OUTPUT_ZIP) {
     $zipSize = (Get-Item $OUTPUT_ZIP).Length / 1MB
-    Write-Host "✓ Runtime pack created: $OUTPUT_ZIP" -ForegroundColor Green
+    Write-Host "[OK] Runtime pack created: $OUTPUT_ZIP" -ForegroundColor Green
     Write-Host "  Size: $([math]::Round($zipSize, 2)) MB" -ForegroundColor Gray
 }
 else {
@@ -357,7 +357,7 @@ $hash = Get-FileHash -Path $OUTPUT_ZIP -Algorithm SHA256
 $checksumFile = "$OUTPUT_ZIP.sha256"
 "$($hash.Hash)  LocalisRuntimePack.zip" | Out-File -FilePath $checksumFile -Encoding ascii
 
-Write-Host "✓ Checksum saved: $checksumFile" -ForegroundColor Green
+Write-Host "[OK] Checksum saved: $checksumFile" -ForegroundColor Green
 Write-Host "  SHA256: $($hash.Hash)" -ForegroundColor Gray
 
 # ============================================================================
@@ -365,11 +365,11 @@ Write-Host "  SHA256: $($hash.Hash)" -ForegroundColor Gray
 # ============================================================================
 
 Write-Host ""
-Write-Host "╔═══════════════════════════════════════════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║                                                                                       ║" -ForegroundColor Green
-Write-Host "║                              BUILD COMPLETED SUCCESSFULLY!                            ║" -ForegroundColor Green
-Write-Host "║                                                                                       ║" -ForegroundColor Green
-Write-Host "╚═══════════════════════════════════════════════════════════════════════════════════════╝" -ForegroundColor Green
+Write-Host "========================================================================================" -ForegroundColor Green
+Write-Host "                                                                                        " -ForegroundColor Green
+Write-Host "                              BUILD COMPLETED SUCCESSFULLY!                             " -ForegroundColor Green
+Write-Host "                                                                                        " -ForegroundColor Green
+Write-Host "========================================================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Output files:" -ForegroundColor White
 Write-Host "  Runtime Pack: $OUTPUT_ZIP" -ForegroundColor Cyan
@@ -381,10 +381,10 @@ Write-Host "  2. Verify bundled Python and Git are detected" -ForegroundColor Gr
 Write-Host "  3. Distribute the zip file to end users" -ForegroundColor Gray
 Write-Host ""
 Write-Host "Distribution checklist:" -ForegroundColor Yellow
-Write-Host "  □ Test on clean Windows VM" -ForegroundColor Gray
-Write-Host "  □ Verify no system Python required" -ForegroundColor Gray
-Write-Host "  □ Include BUILD_WINDOWS.md as user guide" -ForegroundColor Gray
-Write-Host "  □ Update config template with correct repo URL" -ForegroundColor Gray
+Write-Host "  [ ] Test on clean Windows VM" -ForegroundColor Gray
+Write-Host "  [ ] Verify no system Python required" -ForegroundColor Gray
+Write-Host "  [ ] Include BUILD_WINDOWS.md as user guide" -ForegroundColor Gray
+Write-Host "  [ ] Update config template with correct repo URL" -ForegroundColor Gray
 Write-Host ""
 
 # TODO: Optional - run quick validation test
