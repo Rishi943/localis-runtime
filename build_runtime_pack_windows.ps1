@@ -18,6 +18,10 @@ $PYTHON_VERSION = "3.12.8"
 $PYTHON_EMBED_URL = "https://www.python.org/ftp/python/$PYTHON_VERSION/python-$PYTHON_VERSION-embed-amd64.zip"
 $GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 
+# Derive Python version tag for file names (e.g., "3.12" -> "312")
+$pyMajorMinor = $PYTHON_VERSION.Substring(0, $PYTHON_VERSION.LastIndexOf('.'))
+$pyTag = $pyMajorMinor.Replace('.', '')
+
 # Portable Git - use official MinGit distribution
 $GIT_VERSION = "2.48.1"
 $GIT_URL = "https://github.com/git-for-windows/git/releases/download/v$GIT_VERSION.windows.1/MinGit-$GIT_VERSION-64-bit.zip"
@@ -144,18 +148,18 @@ Remove-Item $pythonZip
 # STEP 3: Patch python312._pth to enable site-packages
 # ============================================================================
 
-Write-Step "Step 3: Patching python312._pth"
+Write-Step "Step 3: Patching python$pyTag._pth"
 
-$pthFile = Join-Path $PYTHON_DIR "python312._pth"
+$pthFile = Join-Path $PYTHON_DIR "python$pyTag._pth"
 if (Test-Path $pthFile) {
-    Write-Host "Found python312._pth, patching..." -ForegroundColor Yellow
+    Write-Host "Found python$pyTag._pth, patching..." -ForegroundColor Yellow
 
     # Read current content
     $pthContent = Get-Content $pthFile
 
     # Create new content with site-packages enabled
     $newContent = @(
-        "python312.zip",
+        "python$pyTag.zip",
         ".",
         "",
         "# Enable site-packages for pip and installed packages",
@@ -166,13 +170,13 @@ if (Test-Path $pthFile) {
     )
 
     # Write patched content
-    $newContent | Out-File -FilePath $pthFile -Encoding ascii -Force
-    Write-Host "python312._pth patched successfully!" -ForegroundColor Green
+    $newContent | Out-File -FilePath $pthFile -Encoding utf8 -Force
+    Write-Host "python$pyTag._pth patched successfully!" -ForegroundColor Green
     Write-Host "  - Added: Lib\site-packages" -ForegroundColor Gray
     Write-Host "  - Added: import site" -ForegroundColor Gray
 }
 else {
-    Write-Host "WARNING: python312._pth not found, may need manual configuration" -ForegroundColor Red
+    Write-Host "WARNING: python$pyTag._pth not found, may need manual configuration" -ForegroundColor Red
 }
 
 # ============================================================================
@@ -227,8 +231,32 @@ foreach ($line in $requirementLines) {
 
 # Write filtered requirements to temp file
 $filteredReqFile = "$DIST_DIR\requirements.filtered.txt"
-$filteredRequirements | Out-File -FilePath $filteredReqFile -Encoding ascii
+$filteredRequirements | Out-File -FilePath $filteredReqFile -Encoding utf8
 Write-Host "Filtered requirements written to: $filteredReqFile" -ForegroundColor Gray
+Write-Host ""
+
+# Preflight check: verify all dependencies have binary wheels available
+Write-Host "Preflight: Checking binary wheel availability..." -ForegroundColor Yellow
+$wheelhouseDir = Join-Path $DIST_DIR "wheelhouse"
+New-Item -ItemType Directory -Path $wheelhouseDir -Force | Out-Null
+& $pythonExe -m pip download -r $filteredReqFile -d $wheelhouseDir --only-binary=:all: --prefer-binary --no-deps --disable-pip-version-check --no-warn-script-location
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: Preflight check failed - one or more dependencies lack binary wheels" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "A dependency has no compatible wheel for Python $PYTHON_VERSION on Windows." -ForegroundColor Yellow
+    Write-Host "Building from source requires Visual Studio build tools (not supported on clean machines)." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Remediation options:" -ForegroundColor Cyan
+    Write-Host "  1. Pin the problematic dependency to a version that has wheels" -ForegroundColor Gray
+    Write-Host "  2. Install Visual Studio build tools on the build machine" -ForegroundColor Gray
+    Write-Host "  3. Use a different Python version that has better wheel coverage" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Review the error output above to identify which package failed." -ForegroundColor Yellow
+    Write-Host ""
+    exit 1
+}
+Write-Host "Preflight passed - all dependencies have binary wheels available" -ForegroundColor Green
 Write-Host ""
 
 # Install filtered requirements using bundled Python
@@ -275,11 +303,26 @@ if (-not $llamaWheel) {
 if ($llamaWheel -eq "INDEX_CPU") {
     # Install from official CPU index
     Write-Host "Wheel source: INDEX_CPU (official index)" -ForegroundColor Gray
-    Write-Host "Installing llama-cpp-python from CPU index..." -ForegroundColor Yellow
-    & $pythonExe -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu --no-warn-script-location --disable-pip-version-check
+    Write-Host "Installing llama-cpp-python from CPU index (wheel-only, no source builds)..." -ForegroundColor Yellow
+    & $pythonExe -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu --only-binary llama-cpp-python --prefer-binary --no-cache-dir --no-warn-script-location --disable-pip-version-check
 
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ERROR: Failed to install llama-cpp-python from CPU index" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Possible causes:" -ForegroundColor Yellow
+        Write-Host "  - pip may have attempted to build from source (sdist)" -ForegroundColor Yellow
+        Write-Host "  - No compatible wheel available for your Python version/platform" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Solutions:" -ForegroundColor Cyan
+        Write-Host "  1. Set LOCALIS_LLAMA_WHEEL to an explicit .whl URL:" -ForegroundColor Cyan
+        Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "https://github.com/.../llama_cpp_python-x.x.x-cp312-win_amd64.whl"' -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "  2. Set LOCALIS_LLAMA_WHEEL to a local .whl path:" -ForegroundColor Cyan
+        Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "C:\wheels\llama_cpp_python-x.x.x-cp312-win_amd64.whl"' -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "Debug command:" -ForegroundColor Cyan
+        Write-Host "  $pythonExe -m pip debug --verbose" -ForegroundColor Gray
+        Write-Host ""
         exit 1
     }
 }
@@ -287,12 +330,31 @@ elseif ($llamaWheel -match "^INDEX_CUDA_(cu\d+)$") {
     # Install from official CUDA index
     $cudaSuffix = $matches[1]
     Write-Host "Wheel source: INDEX_CUDA_$cudaSuffix (official index)" -ForegroundColor Gray
-    Write-Host "Installing llama-cpp-python from CUDA $cudaSuffix index..." -ForegroundColor Yellow
+    Write-Host "Installing llama-cpp-python from CUDA $cudaSuffix index (wheel-only, no source builds)..." -ForegroundColor Yellow
     $indexUrl = "https://abetlen.github.io/llama-cpp-python/whl/$cudaSuffix"
-    & $pythonExe -m pip install llama-cpp-python --extra-index-url $indexUrl --no-warn-script-location --disable-pip-version-check
+    & $pythonExe -m pip install llama-cpp-python --extra-index-url $indexUrl --only-binary llama-cpp-python --prefer-binary --no-cache-dir --no-warn-script-location --disable-pip-version-check
 
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ERROR: Failed to install llama-cpp-python from CUDA $cudaSuffix index" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Possible causes:" -ForegroundColor Yellow
+        Write-Host "  - pip may have attempted to build from source (sdist)" -ForegroundColor Yellow
+        Write-Host "  - No compatible wheel available for your Python version/platform" -ForegroundColor Yellow
+        Write-Host "  - CUDA version mismatch (you specified $cudaSuffix)" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Solutions:" -ForegroundColor Cyan
+        Write-Host "  1. Try a different CUDA version (cu121, cu122, cu123, cu124, cu125):" -ForegroundColor Cyan
+        Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "INDEX_CUDA_cu122"' -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "  2. Set LOCALIS_LLAMA_WHEEL to an explicit .whl URL:" -ForegroundColor Cyan
+        Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "https://github.com/.../llama_cpp_python-x.x.x-cp312-win_amd64.whl"' -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "  3. Set LOCALIS_LLAMA_WHEEL to a local .whl path:" -ForegroundColor Cyan
+        Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "C:\wheels\llama_cpp_python-x.x.x-cp312-win_amd64.whl"' -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "Debug command:" -ForegroundColor Cyan
+        Write-Host "  $pythonExe -m pip debug --verbose" -ForegroundColor Gray
+        Write-Host ""
         exit 1
     }
 }
