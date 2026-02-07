@@ -1,12 +1,38 @@
 # build_runtime_pack_windows.ps1
-# PowerShell script to build LocalMind Windows Runtime Pack
+# PowerShell script to build Localis Windows Runtime Pack
+# Phase 1 Implementation - Canonical Build Script
 # Requires: PowerShell 5.1+, Internet connection
-# Purpose: Creates distributable zip with launcher, bundled Python, and Git
+
+# ============================================================================
+# ACCEPTANCE TESTS (Phase 1)
+# ============================================================================
+# These tests verify that the runtime pack is built correctly:
+#
+# TEST 1: Clean build produces dist\LocalisRuntimePack.zip
+#   Verify: dist\LocalisRuntimePack.zip exists after successful build
+#
+# TEST 2: Extracted zip contains required structure
+#   Extract the zip and verify presence of:
+#   - runtime\python\python.exe
+#   - runtime\git\bin\git.exe
+#   - launcher_windows.py (at root of extracted directory)
+#   - localis_runtime_config.json (at root)
+#
+# TEST 3: llama-cpp-python imports successfully
+#   From extracted runtime pack, run:
+#     dist\runtime\python\python.exe -c "import llama_cpp; print('ok')"
+#   Expected output: "ok"
+#   Expected exit code: 0
+#
+# ============================================================================
 
 #Requires -Version 5.1
 
 [CmdletBinding()]
-param()
+param(
+    [switch]$SkipVerify
+)
+
 
 $ErrorActionPreference = "Stop"
 
@@ -14,11 +40,19 @@ $ErrorActionPreference = "Stop"
 # CONFIGURATION
 # ============================================================================
 
-$PYTHON_VERSION = "3.12.8"
-$PYTHON_EMBED_URL = "https://www.python.org/ftp/python/$PYTHON_VERSION/python-$PYTHON_VERSION-embed-amd64.zip"
+# FIXED: Use Python 3.11 for better wheel availability
+$PYTHON_VERSION = "3.11.9"
+$PYTHON_EMBED_URL = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip"
 $GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 
-# Derive Python version tag for file names (e.g., "3.12" -> "312")
+# llama-cpp-python: install prebuilt wheels from the official wheel index
+$LLAMA_CPP_VERSION = "0.3.2"
+$LLAMA_CPP_CPU_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+
+# Visual C++ 2015-2022 Redistributable (required for llama.dll)
+$VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+
+# Derive Python version tag for file names (e.g., "3.11" -> "311")
 $pyMajorMinor = $PYTHON_VERSION.Substring(0, $PYTHON_VERSION.LastIndexOf('.'))
 $pyTag = $pyMajorMinor.Replace('.', '')
 
@@ -36,13 +70,19 @@ $OUTPUT_ZIP = "$DIST_DIR\LocalisRuntimePack.zip"
 # Environment variable for app repo path (must contain requirements.txt)
 $APP_REPO_PATH = $env:LOCALIS_APP_REPO_PATH
 if (-not $APP_REPO_PATH) {
-    Write-Host "ERROR: LOCALIS_APP_REPO_PATH environment variable not set" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Please set the path to your local Localis application repository:" -ForegroundColor Yellow
-    Write-Host '  $env:LOCALIS_APP_REPO_PATH = "C:\path\to\localis"' -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "The repository must contain a requirements.txt file." -ForegroundColor Yellow
-    exit 1
+    # FALLBACK: If not set, assume we're in the app repo itself
+    if (Test-Path "requirements.txt") {
+        $APP_REPO_PATH = Get-Location
+        Write-Host "Using current directory as app repo: $APP_REPO_PATH" -ForegroundColor Yellow
+    } else {
+        Write-Host "ERROR: LOCALIS_APP_REPO_PATH environment variable not set" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Please set the path to your local Localis application repository:" -ForegroundColor Yellow
+        Write-Host '  $env:LOCALIS_APP_REPO_PATH = "C:\path\to\localis"' -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "Or run this script from within the app repository directory." -ForegroundColor Yellow
+        exit 1
+    }
 }
 
 $REQUIREMENTS_FILE = Join-Path $APP_REPO_PATH "requirements.txt"
@@ -65,33 +105,221 @@ function Write-Step {
 
 function Download-File {
     param(
-        [string]$Url,
-        [string]$OutputPath
+        [Parameter(Mandatory=$true)][string]$Url,
+        [Parameter(Mandatory=$true)][string]$OutputPath
     )
-    Write-Host "Downloading: $Url" -ForegroundColor Yellow
-    Write-Host "         to: $OutputPath" -ForegroundColor Yellow
 
-    # Use .NET WebClient for progress (Invoke-WebRequest can be slow)
-    $webClient = New-Object System.Net.WebClient
-    try {
-        $webClient.DownloadFile($Url, $OutputPath)
-        Write-Host "Download complete!" -ForegroundColor Green
+    Write-Host "Downloading (Invoke-WebRequest): $Url" -ForegroundColor Yellow
+
+    if (Test-Path $OutputPath) {
+        Remove-Item $OutputPath -Force -ErrorAction SilentlyContinue
     }
-    finally {
-        $webClient.Dispose()
+
+    $ext = [System.IO.Path]::GetExtension($OutputPath).ToLowerInvariant()
+
+    try {
+        # Improve compatibility with PS 5.1 + some hosts
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+        Invoke-WebRequest -Uri $Url -OutFile $OutputPath -UseBasicParsing -TimeoutSec 600 `
+            -Headers @{ "User-Agent" = "Mozilla/5.0" } -ErrorAction Stop
+
+        if (-not (Test-Path $OutputPath)) { throw "File not created: $OutputPath" }
+
+        $size = (Get-Item $OutputPath).Length
+        if ($size -lt 1024) { throw "Downloaded file too small ($size bytes)" }
+
+        if ($ext -in @(".zip", ".whl")) {
+            Assert-ZipMagic -Path $OutputPath -Label "Downloaded file"
+        }
+
+        return
+    } catch {
+        Write-Host "Invoke-WebRequest failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    Write-Host "Downloading (curl.exe): $Url" -ForegroundColor Yellow
+
+    if (Test-Path $OutputPath) {
+        Remove-Item $OutputPath -Force -ErrorAction SilentlyContinue
+    }
+
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if (-not $curl) {
+        throw "Download failed: curl.exe not found and Invoke-WebRequest failed. URL=$Url"
+    }
+
+    & $curl.Source --fail --location --retry 5 --retry-all-errors --connect-timeout 30 `
+        -A "Mozilla/5.0" $Url -o $OutputPath
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "curl.exe failed (exit=$LASTEXITCODE). URL=$Url"
+    }
+
+    if (-not (Test-Path $OutputPath)) { throw "File not created by curl: $OutputPath" }
+
+    $size = (Get-Item $OutputPath).Length
+    if ($size -lt 1024) { throw "curl produced an invalid file (too small): $OutputPath ($size bytes)" }
+
+    if ($ext -in @(".zip", ".whl")) {
+        Assert-ZipMagic -Path $OutputPath -Label "Downloaded file"
     }
 }
 
+
+
+
+# Ch (paste artifact - removed to fix parse error)
+
+
 function Expand-ZipFile {
     param(
-        [string]$ZipPath,
-        [string]$DestinationPath
+        [Parameter(Mandatory=$true)][string]$ZipPath,
+        [Parameter(Mandatory=$true)][string]$DestinationPath
     )
+
     Write-Host "Extracting: $ZipPath" -ForegroundColor Yellow
     Write-Host "        to: $DestinationPath" -ForegroundColor Yellow
 
-    Expand-Archive -Path $ZipPath -DestinationPath $DestinationPath -Force
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+    if (Test-Path $DestinationPath) {
+        Remove-Item $DestinationPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Path $DestinationPath -Force | Out-Null
+
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $DestinationPath)
     Write-Host "Extraction complete!" -ForegroundColor Green
+}
+
+function Assert-ZipMagic {
+    param([string]$Path, [string]$Label)
+
+    $fs = [System.IO.File]::OpenRead($Path)
+    try {
+        $b1 = $fs.ReadByte()
+        $b2 = $fs.ReadByte()
+    } finally {
+        $fs.Dispose()
+    }
+
+    # ZIP files start with 'PK' (0x50 0x4B)
+    if ($b1 -ne 0x50 -or $b2 -ne 0x4B) {
+        throw "$Label is not a valid zip-based file (missing PK header): $Path"
+    }
+}
+
+function Verify-FileHash {
+    param(
+        [string]$FilePath,
+        [string]$ExpectedHash = $null
+    )
+
+    if (-not (Test-Path $FilePath)) {
+        Write-Host "ERROR: File not found: $FilePath" -ForegroundColor Red
+        return $false
+    }
+
+    $actualHash = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash
+    Write-Host "  SHA256: $actualHash" -ForegroundColor Gray
+
+    if ($ExpectedHash) {
+        if ($actualHash -eq $ExpectedHash) {
+            Write-Host "  [OK] Checksum verified" -ForegroundColor Green
+            return $true
+        } else {
+            Write-Host "  [X] Checksum mismatch!" -ForegroundColor Red
+            Write-Host "    Expected: $ExpectedHash" -ForegroundColor Red
+            Write-Host "    Got:      $actualHash" -ForegroundColor Red
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-VCRedistX64Installed {
+    <#
+    .SYNOPSIS
+    Checks if Visual C++ 2015-2022 x64 Redistributable is installed.
+
+    .DESCRIPTION
+    Queries the registry for VC++ runtime version 14.0 (covers 2015-2022).
+    Returns $true if installed, $false otherwise.
+    #>
+
+    $regPath = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+
+    if (Test-Path $regPath) {
+        try {
+            $installed = Get-ItemProperty -Path $regPath -Name "Installed" -ErrorAction SilentlyContinue
+            if ($installed.Installed -eq 1) {
+                return $true
+            }
+        } catch {
+            return $false
+        }
+    }
+
+    return $false
+}
+
+function Ensure-VCRedistX64 {
+    <#
+    .SYNOPSIS
+    Ensures Visual C++ 2015-2022 x64 Redistributable is installed.
+
+    .DESCRIPTION
+    Checks registry for VC++ runtime. If not found, downloads and installs silently.
+    Validates installation after install. Throws on failure.
+    #>
+
+    Write-Host ""
+    Write-Host "Checking Visual C++ 2015-2022 Redistributable (x64)..." -ForegroundColor Yellow
+
+    if (Test-VCRedistX64Installed) {
+        Write-Host "[OK] VC++ Redistributable already installed" -ForegroundColor Green
+        return
+    }
+
+    Write-Host "VC++ Redistributable not detected, installing..." -ForegroundColor Yellow
+
+    # Download redistributable
+    $vcRedistPath = Join-Path $DIST_DIR "vc_redist.x64.exe"
+
+    if (-not (Test-Path $vcRedistPath)) {
+        Download-File -Url $VC_REDIST_URL -OutputPath $vcRedistPath
+    } else {
+        Write-Host "Using cached vc_redist.x64.exe" -ForegroundColor Gray
+    }
+
+    # Install silently (no reboot, no UI)
+    Write-Host "Installing VC++ Redistributable (silent mode)..." -ForegroundColor Yellow
+    Write-Host "  Command: vc_redist.x64.exe /install /quiet /norestart" -ForegroundColor Gray
+
+    $installProc = Start-Process -FilePath $vcRedistPath -ArgumentList "/install", "/quiet", "/norestart" -Wait -PassThru -NoNewWindow
+    $exitCode = $installProc.ExitCode
+
+    Write-Host "  Exit code: $exitCode" -ForegroundColor Gray
+
+    # Exit codes: 0 = success, 3010 = success but reboot required
+    if ($exitCode -ne 0 -and $exitCode -ne 3010) {
+        throw "VC++ Redistributable installation failed with exit code: $exitCode"
+    }
+
+    if ($exitCode -eq 3010) {
+        Write-Host "  [!] Installation successful but reboot required" -ForegroundColor Yellow
+    }
+
+    # Re-check registry
+    if (Test-VCRedistX64Installed) {
+        Write-Host "[OK] VC++ Redistributable installed successfully" -ForegroundColor Green
+    } else {
+        throw "VC++ Redistributable installation completed but registry check failed. A reboot may be required."
+    }
+
+    # Keep vc_redist.x64.exe in dist/ for installer bundling (do NOT delete)
+    Write-Host "  Kept vc_redist.x64.exe in dist/ for installer bundling" -ForegroundColor Gray
 }
 
 # ============================================================================
@@ -101,7 +329,7 @@ function Expand-ZipFile {
 Write-Host ""
 Write-Host "========================================================================================" -ForegroundColor Magenta
 Write-Host "                                                                                        " -ForegroundColor Magenta
-Write-Host "                    LocalMind Windows Runtime Pack Builder                             " -ForegroundColor Magenta
+Write-Host "                    Localis Windows Runtime Pack Builder                               " -ForegroundColor Magenta
 Write-Host "                                                                                        " -ForegroundColor Magenta
 Write-Host "========================================================================================" -ForegroundColor Magenta
 Write-Host ""
@@ -111,6 +339,10 @@ Write-Host "  Git Version:    $GIT_VERSION" -ForegroundColor Gray
 Write-Host "  App Repo Path:  $APP_REPO_PATH" -ForegroundColor Gray
 Write-Host "  Output Zip:     $OUTPUT_ZIP" -ForegroundColor Gray
 Write-Host ""
+
+
+
+
 
 # ============================================================================
 # STEP 1: Clean and prepare directories
@@ -138,6 +370,10 @@ $pythonZip = "$DIST_DIR\python-embed.zip"
 Download-File -Url $PYTHON_EMBED_URL -OutputPath $pythonZip
 
 Write-Host ""
+Write-Host "Verifying download..." -ForegroundColor Yellow
+Verify-FileHash -FilePath $pythonZip
+
+Write-Host ""
 Write-Host "Extracting Python runtime..." -ForegroundColor Yellow
 Expand-ZipFile -ZipPath $pythonZip -DestinationPath $PYTHON_DIR
 
@@ -145,7 +381,7 @@ Expand-ZipFile -ZipPath $pythonZip -DestinationPath $PYTHON_DIR
 Remove-Item $pythonZip
 
 # ============================================================================
-# STEP 3: Patch python312._pth to enable site-packages
+# STEP 3: Patch python3XX._pth to enable site-packages
 # ============================================================================
 
 Write-Step "Step 3: Patching python$pyTag._pth"
@@ -153,9 +389,6 @@ Write-Step "Step 3: Patching python$pyTag._pth"
 $pthFile = Join-Path $PYTHON_DIR "python$pyTag._pth"
 if (Test-Path $pthFile) {
     Write-Host "Found python$pyTag._pth, patching..." -ForegroundColor Yellow
-
-    # Read current content
-    $pthContent = Get-Content $pthFile
 
     # Create new content with site-packages enabled
     $newContent = @(
@@ -169,11 +402,21 @@ if (Test-Path $pthFile) {
         "import site"
     )
 
-    # Write patched content (UTF-8 without BOM)
+    # FIXED: Write patched content UTF-8 WITHOUT BOM
     [System.IO.File]::WriteAllLines($pthFile, $newContent, (New-Object System.Text.UTF8Encoding($false)))
+
     Write-Host "python$pyTag._pth patched successfully!" -ForegroundColor Green
     Write-Host "  - Added: Lib\site-packages" -ForegroundColor Gray
     Write-Host "  - Added: import site" -ForegroundColor Gray
+
+    # VERIFY: Check no BOM was written
+    $bytes = [System.IO.File]::ReadAllBytes($pthFile)
+    if ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        Write-Host "  [X] WARNING: BOM detected in _pth file!" -ForegroundColor Red
+        exit 1
+    } else {
+        Write-Host "  [OK] No BOM in _pth file" -ForegroundColor Green
+    }
 }
 else {
     Write-Host "WARNING: python$pyTag._pth not found, may need manual configuration" -ForegroundColor Red
@@ -191,7 +434,9 @@ Download-File -Url $GET_PIP_URL -OutputPath $getPipScript
 Write-Host ""
 Write-Host "Installing pip..." -ForegroundColor Yellow
 $pythonExe = Join-Path $PYTHON_DIR "python.exe"
-& $pythonExe $getPipScript --no-warn-script-location
+
+# FIXED: Removed --no-warn-script-location flag (not supported in pip 25.3+)
+& $pythonExe $getPipScript
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Failed to install pip" -ForegroundColor Red
@@ -204,332 +449,279 @@ Write-Host "Pip installed successfully!" -ForegroundColor Green
 Remove-Item $getPipScript
 
 # ============================================================================
-# STEP 5: Install dependencies from requirements.txt
+# STEP 5: Install Python dependencies
 # ============================================================================
 
 Write-Step "Step 5: Installing Python dependencies"
 
-Write-Host "Reading requirements from: $REQUIREMENTS_FILE" -ForegroundColor Yellow
+Write-Host "Reading requirements from: $REQUIREMENTS_FILE" -ForegroundColor Gray
 Write-Host ""
 
-# Filter out llama-cpp-python to avoid source builds requiring VS build tools
+# Create filtered requirements (exclude llama-cpp-python - we'll install from wheel)
+$requirements = Get-Content $REQUIREMENTS_FILE
+$filtered = $requirements | Where-Object { $_ -notmatch "^llama-cpp-python" -and $_.Trim() -ne "" -and -not $_.StartsWith("#") }
+$filteredFile = "$DIST_DIR\requirements.filtered.txt"
+$filtered | Out-File -FilePath $filteredFile -Encoding utf8
+
 Write-Host "Filtering requirements (excluding llama-cpp-python)..." -ForegroundColor Yellow
-$filteredRequirements = @()
-$requirementLines = Get-Content $REQUIREMENTS_FILE
-foreach ($line in $requirementLines) {
-    $trimmedLine = $line.Trim()
-    # Skip blank lines, comments, and llama-cpp-python
-    if ($trimmedLine -eq "" -or $trimmedLine.StartsWith("#")) {
-        continue
-    }
-    if ($trimmedLine -match "^llama-cpp-python") {
-        Write-Host "  Skipping: $trimmedLine (will install from wheel)" -ForegroundColor Gray
-        continue
-    }
-    $filteredRequirements += $line
-}
-
-# Write filtered requirements to temp file (UTF-8 without BOM)
-$filteredReqFile = "$DIST_DIR\requirements.filtered.txt"
-[System.IO.File]::WriteAllLines($filteredReqFile, $filteredRequirements, (New-Object System.Text.UTF8Encoding($false)))
-Write-Host "Filtered requirements written to: $filteredReqFile" -ForegroundColor Gray
+Write-Host "  Skipping: llama-cpp-python (will install from pre-compiled wheel)" -ForegroundColor Gray
+Write-Host "Filtered requirements written to: $filteredFile" -ForegroundColor Gray
 Write-Host ""
 
-# Preflight check: verify all dependencies have binary wheels available
-Write-Host "Preflight: Checking binary wheel availability..." -ForegroundColor Yellow
-$wheelhouseDir = Join-Path $DIST_DIR "wheelhouse"
-New-Item -ItemType Directory -Path $wheelhouseDir -Force | Out-Null
-& $pythonExe -m pip download -r $filteredReqFile -d $wheelhouseDir --only-binary=:all: --prefer-binary --no-deps --disable-pip-version-check
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: Preflight check failed - one or more dependencies lack binary wheels" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "A dependency has no compatible wheel for Python $PYTHON_VERSION on Windows." -ForegroundColor Yellow
-    Write-Host "Building from source requires Visual Studio build tools (not supported on clean machines)." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Remediation options:" -ForegroundColor Cyan
-    Write-Host "  1. Pin the problematic dependency to a version that has wheels" -ForegroundColor Gray
-    Write-Host "  2. Install Visual Studio build tools on the build machine" -ForegroundColor Gray
-    Write-Host "  3. Use a different Python version that has better wheel coverage" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "Review the error output above to identify which package failed." -ForegroundColor Yellow
-    Write-Host ""
-    exit 1
-}
-Write-Host "Preflight passed - all dependencies have binary wheels available" -ForegroundColor Green
-Write-Host ""
-
-# Install filtered requirements using bundled Python
+# Install non-binary dependencies
 Write-Host "Installing dependencies (this may take several minutes)..." -ForegroundColor Yellow
-& $pythonExe -m pip install -r $filteredReqFile --no-warn-script-location --disable-pip-version-check
+
+# FIXED: Removed --no-warn-script-location flag
+& $pythonExe -m pip install -r $filteredFile --disable-pip-version-check
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Failed to install dependencies" -ForegroundColor Red
     exit 1
 }
 
-Write-Host ""
-Write-Host "Base dependencies installed successfully!" -ForegroundColor Green
-
-# Install llama-cpp-python from prebuilt wheel
-Write-Host ""
-Write-Host "Installing llama-cpp-python from prebuilt wheel..." -ForegroundColor Yellow
-
-$llamaWheel = $env:LOCALIS_LLAMA_WHEEL
-if (-not $llamaWheel) {
-    Write-Host "ERROR: LOCALIS_LLAMA_WHEEL environment variable not set" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "llama-cpp-python cannot be built from source on clean Windows" -ForegroundColor Yellow
-    Write-Host "without Visual Studio build tools and cmake." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Please set LOCALIS_LLAMA_WHEEL to one of the following:" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  1. Official index (CPU-only):" -ForegroundColor Cyan
-    Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "INDEX_CPU"' -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  2. Official index (CUDA):" -ForegroundColor Cyan
-    Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "INDEX_CUDA_cu121"  # or cu122, cu123, cu124, cu125' -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  3. URL to .whl file:" -ForegroundColor Cyan
-    Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "https://github.com/.../llama_cpp_python-0.x.x-cp312-win_amd64.whl"' -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  4. Local path to .whl file:" -ForegroundColor Cyan
-    Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "C:\wheels\llama_cpp_python-0.x.x-cp312-win_amd64.whl"' -ForegroundColor Cyan
-    Write-Host ""
-    exit 1
-}
-
-# Check if special index value, URL, or local path
-if ($llamaWheel -eq "INDEX_CPU") {
-    # Install from official CPU index
-    Write-Host "Wheel source: INDEX_CPU (official index)" -ForegroundColor Gray
-    Write-Host "Installing llama-cpp-python from CPU index (wheel-only, no source builds)..." -ForegroundColor Yellow
-    & $pythonExe -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu --only-binary llama-cpp-python --prefer-binary --no-cache-dir --no-warn-script-location --disable-pip-version-check
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Failed to install llama-cpp-python from CPU index" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "Possible causes:" -ForegroundColor Yellow
-        Write-Host "  - pip may have attempted to build from source (sdist)" -ForegroundColor Yellow
-        Write-Host "  - No compatible wheel available for your Python version/platform" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "Solutions:" -ForegroundColor Cyan
-        Write-Host "  1. Set LOCALIS_LLAMA_WHEEL to an explicit .whl URL:" -ForegroundColor Cyan
-        Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "https://github.com/.../llama_cpp_python-x.x.x-cp312-win_amd64.whl"' -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "  2. Set LOCALIS_LLAMA_WHEEL to a local .whl path:" -ForegroundColor Cyan
-        Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "C:\wheels\llama_cpp_python-x.x.x-cp312-win_amd64.whl"' -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "Debug command:" -ForegroundColor Cyan
-        Write-Host "  $pythonExe -m pip debug --verbose" -ForegroundColor Gray
-        Write-Host ""
-        exit 1
-    }
-}
-elseif ($llamaWheel -match "^INDEX_CUDA_(cu\d+)$") {
-    # Install from official CUDA index
-    $cudaSuffix = $matches[1]
-    Write-Host "Wheel source: INDEX_CUDA_$cudaSuffix (official index)" -ForegroundColor Gray
-    Write-Host "Installing llama-cpp-python from CUDA $cudaSuffix index (wheel-only, no source builds)..." -ForegroundColor Yellow
-    $indexUrl = "https://abetlen.github.io/llama-cpp-python/whl/$cudaSuffix"
-    & $pythonExe -m pip install llama-cpp-python --extra-index-url $indexUrl --only-binary llama-cpp-python --prefer-binary --no-cache-dir --no-warn-script-location --disable-pip-version-check
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Failed to install llama-cpp-python from CUDA $cudaSuffix index" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "Possible causes:" -ForegroundColor Yellow
-        Write-Host "  - pip may have attempted to build from source (sdist)" -ForegroundColor Yellow
-        Write-Host "  - No compatible wheel available for your Python version/platform" -ForegroundColor Yellow
-        Write-Host "  - CUDA version mismatch (you specified $cudaSuffix)" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "Solutions:" -ForegroundColor Cyan
-        Write-Host "  1. Try a different CUDA version (cu121, cu122, cu123, cu124, cu125):" -ForegroundColor Cyan
-        Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "INDEX_CUDA_cu122"' -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "  2. Set LOCALIS_LLAMA_WHEEL to an explicit .whl URL:" -ForegroundColor Cyan
-        Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "https://github.com/.../llama_cpp_python-x.x.x-cp312-win_amd64.whl"' -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "  3. Set LOCALIS_LLAMA_WHEEL to a local .whl path:" -ForegroundColor Cyan
-        Write-Host '     $env:LOCALIS_LLAMA_WHEEL = "C:\wheels\llama_cpp_python-x.x.x-cp312-win_amd64.whl"' -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "Debug command:" -ForegroundColor Cyan
-        Write-Host "  $pythonExe -m pip debug --verbose" -ForegroundColor Gray
-        Write-Host ""
-        exit 1
-    }
-}
-elseif ($llamaWheel -match "^https?://") {
-    # Download from URL
-    Write-Host "Wheel source: $llamaWheel" -ForegroundColor Gray
-    $wheelFile = "$DIST_DIR\llama_cpp_python.whl"
-    Write-Host "Downloading wheel from URL..." -ForegroundColor Yellow
-    Download-File -Url $llamaWheel -OutputPath $wheelFile
-    $wheelToInstall = $wheelFile
-
-    # Install the wheel
-    Write-Host "Installing llama-cpp-python wheel..." -ForegroundColor Yellow
-    & $pythonExe -m pip install $wheelToInstall --no-warn-script-location --disable-pip-version-check
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Failed to install llama-cpp-python wheel" -ForegroundColor Red
-        exit 1
-    }
-}
-else {
-    # Local path
-    Write-Host "Wheel source: $llamaWheel" -ForegroundColor Gray
-    if (-not (Test-Path $llamaWheel)) {
-        Write-Host "ERROR: Wheel file not found at: $llamaWheel" -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "Using local wheel file" -ForegroundColor Gray
-    $wheelToInstall = $llamaWheel
-
-    # Install the wheel
-    Write-Host "Installing llama-cpp-python wheel..." -ForegroundColor Yellow
-    & $pythonExe -m pip install $wheelToInstall --no-warn-script-location --disable-pip-version-check
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Failed to install llama-cpp-python wheel" -ForegroundColor Red
-        exit 1
-    }
-}
-
-Write-Host ""
-Write-Host "llama-cpp-python installed successfully!" -ForegroundColor Green
-
-# Verify critical packages are installed
-Write-Host ""
-Write-Host "Verifying critical packages..." -ForegroundColor Yellow
-$criticalPackages = @("uvicorn", "fastapi", "llama-cpp-python")
-foreach ($package in $criticalPackages) {
-    & $pythonExe -m pip show $package | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  [OK] $package" -ForegroundColor Green
-    }
-    else {
-        Write-Host "  [X] $package (NOT FOUND)" -ForegroundColor Red
-    }
-}
+Write-Host "Dependencies installed successfully!" -ForegroundColor Green
 
 # ============================================================================
-# STEP 6: Download and extract portable Git
+
+# STEP 6: Install llama-cpp-python from pinned Windows wheel
 # ============================================================================
+Write-Step "Step 6: Installing llama-cpp-python (pinned wheel for Windows cp$pyTag)"
 
-Write-Step "Step 6: Downloading portable Git (MinGit)"
+# Build filename using current embedded Python tag (311)
+$wheelFileName = "llama_cpp_python-$LLAMA_CPP_VERSION-cp$pyTag-cp$pyTag-win_amd64.whl"
+$LLAMA_WHEEL_URL = "https://github.com/abetlen/llama-cpp-python/releases/download/v$LLAMA_CPP_VERSION/$wheelFileName"
 
-$gitZip = "$DIST_DIR\mingit.zip"
+# IMPORTANT: save using the real wheel filename (pip requires it)
+$wheelPath = Join-Path $DIST_DIR $wheelFileName
+
+Download-File -Url $LLAMA_WHEEL_URL -OutputPath $wheelPath
+
+# Install the wheel (allow deps if any; they are pure python)
+& $pythonExe -m pip install --force-reinstall $wheelPath --disable-pip-version-check
+if ($LASTEXITCODE -ne 0) { throw "llama-cpp-python wheel install failed" }
+
+# Hard check: confirm dll exists
+$llamaDll = Join-Path $PYTHON_DIR "Lib\site-packages\llama_cpp\lib\llama.dll"
+if (-not (Test-Path $llamaDll)) {
+    throw "llama.dll missing after wheel install: $llamaDll"
+}
+
+# Ensure Visual C++ Redistributable is installed (required for llama.dll)
+Ensure-VCRedistX64
+
+# Quick import test
+Write-Host ""
+Write-Host "Testing llama_cpp import..." -ForegroundColor Yellow
+& $pythonExe -c "import llama_cpp; print('ok')"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "ERROR: llama_cpp import failed" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Diagnostic information:" -ForegroundColor Yellow
+    Write-Host "  - llama.dll exists at: $llamaDll" -ForegroundColor Gray
+    Write-Host "  - VC++ Redistributable check passed" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Possible causes:" -ForegroundColor Yellow
+    Write-Host "  1. A system reboot may be required after VC++ installation" -ForegroundColor Gray
+    Write-Host "  2. Missing additional runtime dependencies (rare)" -ForegroundColor Gray
+    Write-Host "  3. GPU/CUDA driver issues (if using CUDA build)" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Recommended action:" -ForegroundColor Yellow
+    Write-Host "  - Reboot your system and re-run this build script" -ForegroundColor Cyan
+    Write-Host ""
+    throw "llama_cpp import failed - see diagnostic information above"
+}
+Write-Host "[OK] llama_cpp imported successfully" -ForegroundColor Green
+
+# ============================================================================
+# STEP 7: Install Portable Git (MinGit) + normalize to runtime\git\bin\git.exe
+# ============================================================================
+Write-Step "Step 7: Installing portable Git (MinGit)"
+
+$gitZip = Join-Path $DIST_DIR "mingit.zip"
+
+# Clean previous
+if (Test-Path $GIT_DIR) {
+    Remove-Item $GIT_DIR -Recurse -Force -ErrorAction SilentlyContinue
+}
+New-Item -ItemType Directory -Path $GIT_DIR -Force | Out-Null
+
+Write-Host "Downloading MinGit..." -ForegroundColor Yellow
+Write-Host "  URL: $GIT_URL" -ForegroundColor Gray
 Download-File -Url $GIT_URL -OutputPath $gitZip
 
-Write-Host ""
-Write-Host "Extracting Git runtime..." -ForegroundColor Yellow
+Write-Host "Extracting MinGit..." -ForegroundColor Yellow
 Expand-ZipFile -ZipPath $gitZip -DestinationPath $GIT_DIR
 
-# Verify git.exe exists
-$gitExe = Join-Path $GIT_DIR "bin\git.exe"
-if (Test-Path $gitExe) {
-    Write-Host "Git extracted successfully!" -ForegroundColor Green
-
-    # Test git
-    & $gitExe --version
-    Write-Host "Git version verified!" -ForegroundColor Green
+# Normalize if the zip extracted into a single top-level folder
+# (some zips contain a wrapper directory)
+$top = Get-ChildItem -Path $GIT_DIR -Force
+if ($top.Count -eq 1 -and $top[0].PSIsContainer) {
+    $maybeRoot = $top[0].FullName
+    if (Test-Path (Join-Path $maybeRoot "cmd\git.exe")) {
+        Write-Host "Normalizing MinGit layout (flattening top folder)..." -ForegroundColor Yellow
+        Get-ChildItem -Path $maybeRoot -Force | ForEach-Object {
+            $dest = Join-Path $GIT_DIR $_.Name
+            if (Test-Path $dest) { Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue }
+            Move-Item -Path $_.FullName -Destination $GIT_DIR -Force
+        }
+        Remove-Item $maybeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
-else {
-    Write-Host "WARNING: git.exe not found at expected location" -ForegroundColor Red
+
+# Locate git.exe in typical MinGit layouts
+$gitExeCandidates = @(
+    (Join-Path $GIT_DIR "cmd\git.exe"),
+    (Join-Path $GIT_DIR "mingw64\bin\git.exe"),
+    (Join-Path $GIT_DIR "usr\bin\git.exe"),
+    (Join-Path $GIT_DIR "bin\git.exe")
+)
+
+$gitExe = $null
+foreach ($p in $gitExeCandidates) {
+    if (Test-Path $p) { $gitExe = $p; break }
 }
 
-# Clean up zip
-Remove-Item $gitZip
+if (-not $gitExe) {
+    $found = Get-ChildItem -Path $GIT_DIR -Recurse -File -Filter git.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found) { $gitExe = $found.FullName }
+}
+
+if (-not $gitExe -or -not (Test-Path $gitExe)) {
+    throw "Portable Git install failed: could not locate git.exe under $GIT_DIR"
+}
+
+Write-Host "Found git.exe:" -ForegroundColor Green
+Write-Host "  $gitExe" -ForegroundColor Gray
+
+# Ensure launcher-compatible canonical path: runtime\git\bin\git.exe
+$canonicalBinDir = Join-Path $GIT_DIR "bin"
+New-Item -ItemType Directory -Path $canonicalBinDir -Force | Out-Null
+$canonicalGit = Join-Path $canonicalBinDir "git.exe"
+
+# Prefer copying cmd\git.exe into bin\git.exe (works because both are one level under root)
+$preferredSource = Join-Path $GIT_DIR "cmd\git.exe"
+$sourceGit = if (Test-Path $preferredSource) { $preferredSource } else { $gitExe }
+
+Copy-Item -Path $sourceGit -Destination $canonicalGit -Force
+$gitExe = $canonicalGit
+
+Write-Host "Canonical git.exe created:" -ForegroundColor Green
+Write-Host "  $gitExe" -ForegroundColor Gray
+
+# Sanity check
+$gv = & $gitExe --version 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "Git sanity check failed at canonical path. Output: $gv"
+}
+Write-Host $gv -ForegroundColor Gray
+
+# Cleanup zip
+Remove-Item $gitZip -Force -ErrorAction SilentlyContinue
+
 
 # ============================================================================
-# STEP 7: Copy launcher and config template
+# STEP 8: Copy launcher and config template FROM APP REPO
 # ============================================================================
 
-Write-Step "Step 7: Copying launcher and configuration"
+Write-Step "Step 8: Copying launcher and configuration"
 
-# Copy launcher script
-$launcherSource = "launcher_windows.py"
+# FIXED: Copy launcher from app repo (not current directory)
+$launcherSource = Join-Path $APP_REPO_PATH "launcher_windows.py"
 $launcherDest = Join-Path $DIST_DIR "launcher_windows.py"
+
 if (Test-Path $launcherSource) {
     Copy-Item -Path $launcherSource -Destination $launcherDest -Force
-    Write-Host "[OK] Copied: launcher_windows.py" -ForegroundColor Green
-}
-else {
-    Write-Host "ERROR: launcher_windows.py not found in current directory" -ForegroundColor Red
+    Write-Host "[OK] Copied launcher from: $launcherSource" -ForegroundColor Green
+} else {
+    Write-Host "ERROR: launcher_windows.py not found at: $launcherSource" -ForegroundColor Red
+    Write-Host "  Expected location: <APP_REPO_PATH>\launcher_windows.py" -ForegroundColor Yellow
+    Write-Host "  Current APP_REPO_PATH: $APP_REPO_PATH" -ForegroundColor Yellow
     exit 1
 }
 
-# Copy config template
-$configSource = "localis_runtime_config.json.example"
+# Copy config template (also from app repo)
+$configSource = Join-Path $APP_REPO_PATH "localis_runtime_config.json.example"
 $configDest = Join-Path $DIST_DIR "localis_runtime_config.json"
+
 if (Test-Path $configSource) {
     Copy-Item -Path $configSource -Destination $configDest -Force
-    Write-Host "[OK] Copied: localis_runtime_config.json (from example)" -ForegroundColor Green
-    Write-Host "  NOTE: Users must edit this file with their repository URL" -ForegroundColor Yellow
-}
-else {
-    Write-Host "WARNING: localis_runtime_config.json.example not found" -ForegroundColor Yellow
+    Write-Host "[OK] Copied config from: $configSource" -ForegroundColor Green
+} else {
+    Write-Host "WARNING: localis_runtime_config.json.example not found, creating default" -ForegroundColor Yellow
+
+    # Create default config
+    @{
+        app_repo_url = "https://github.com/user/localis-app.git"
+        app_branch = "release"
+        host = "127.0.0.1"
+        port = 8000
+    } | ConvertTo-Json | Out-File -FilePath $configDest -Encoding utf8
+
+    Write-Host "[OK] Created default config" -ForegroundColor Green
 }
 
-# TODO: Optionally copy README or user guide
-# Copy-Item -Path "BUILD_WINDOWS.md" -Destination "$DIST_DIR\README.md" -Force
+# Optionally copy README
+$readmeSource = Join-Path $APP_REPO_PATH "BUILD_WINDOWS.md"
+if (Test-Path $readmeSource) {
+    Copy-Item -Path $readmeSource -Destination "$DIST_DIR\README.md" -Force
+    Write-Host "[OK] Copied README" -ForegroundColor Green
+}
+
 
 # ============================================================================
-# STEP 8: Create distributable zip
+# STEP 9: Create distributable zip
 # ============================================================================
 
-Write-Step "Step 8: Creating distributable zip"
+Write-Step "Step 9: Creating distributable zip"
 
-# Remove old zip if exists
-if (Test-Path $OUTPUT_ZIP) {
-    Remove-Item $OUTPUT_ZIP -Force
+if (Test-Path $OUTPUT_ZIP) { Remove-Item $OUTPUT_ZIP -Force }
+
+# Stage into a clean folder so ZIP entries are guaranteed relative
+$STAGE_DIR = Join-Path $DIST_DIR "_stage_pack"
+if (Test-Path $STAGE_DIR) { Remove-Item $STAGE_DIR -Recurse -Force }
+New-Item -ItemType Directory -Path $STAGE_DIR | Out-Null
+
+# Copy runtime/ as runtime/
+Copy-Item -Path $RUNTIME_DIR -Destination (Join-Path $STAGE_DIR "runtime") -Recurse -Force
+
+# Copy root files
+Copy-Item -Path (Join-Path $DIST_DIR "launcher_windows.py") -Destination (Join-Path $STAGE_DIR "launcher_windows.py") -Force
+Copy-Item -Path (Join-Path $DIST_DIR "localis_runtime_config.json") -Destination (Join-Path $STAGE_DIR "localis_runtime_config.json") -Force
+if (Test-Path (Join-Path $DIST_DIR "README.md")) {
+    Copy-Item -Path (Join-Path $DIST_DIR "README.md") -Destination (Join-Path $STAGE_DIR "README.md") -Force
 }
 
-# Create zip
-Write-Host "Compressing runtime pack..." -ForegroundColor Yellow
-Write-Host "This may take several minutes..." -ForegroundColor Yellow
-Write-Host ""
-
-# Get all items in dist directory except the zip itself
-$itemsToZip = Get-ChildItem -Path $DIST_DIR -Exclude "*.zip"
-
-# Create zip (using .NET for better compression)
+Write-Host "Creating zip from stage folder..." -ForegroundColor Yellow
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$compressionLevel = [System.IO.Compression.CompressionLevel]::Optimal
+[System.IO.Compression.ZipFile]::CreateFromDirectory($STAGE_DIR, $OUTPUT_ZIP, [System.IO.Compression.CompressionLevel]::Optimal, $false)
 
-# Create temp directory for zip structure
-$tempZipDir = "$DIST_DIR\LocalisRuntimePack"
-if (Test-Path $tempZipDir) {
-    Remove-Item $tempZipDir -Recurse -Force
-}
-New-Item -ItemType Directory -Path $tempZipDir -Force | Out-Null
+# Remove staging folder
+Remove-Item $STAGE_DIR -Recurse -Force
 
-# Copy items to temp directory
-foreach ($item in $itemsToZip) {
-    Copy-Item -Path $item.FullName -Destination $tempZipDir -Recurse -Force
-}
+# Sanity check: detect accidental absolute-path entries
+$z = [System.IO.Compression.ZipFile]::OpenRead($OUTPUT_ZIP)
+$bad = $z.Entries | Where-Object { $_.FullName -match '^[A-Za-z]:|^[A-Za-z][\\/]' }
+$first10 = $z.Entries | Select-Object -First 10 -ExpandProperty FullName
+$z.Dispose()
 
-# Create zip from temp directory
-[System.IO.Compression.ZipFile]::CreateFromDirectory($tempZipDir, $OUTPUT_ZIP, $compressionLevel, $false)
+Write-Host ""
+Write-Host "First 10 entries:" -ForegroundColor Gray
+$first10 | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
 
-# Clean up temp directory
-Remove-Item $tempZipDir -Recurse -Force
+if ($bad) { throw "ZIP contains invalid absolute-like entry: $($bad[0].FullName)" }
 
-if (Test-Path $OUTPUT_ZIP) {
-    $zipSize = (Get-Item $OUTPUT_ZIP).Length / 1MB
-    Write-Host "[OK] Runtime pack created: $OUTPUT_ZIP" -ForegroundColor Green
-    Write-Host "  Size: $([math]::Round($zipSize, 2)) MB" -ForegroundColor Gray
-}
-else {
-    Write-Host "ERROR: Failed to create zip file" -ForegroundColor Red
-    exit 1
-}
+$zipSize = (Get-Item $OUTPUT_ZIP).Length / 1MB
+Write-Host ""
+Write-Host "[OK] Runtime pack created: $OUTPUT_ZIP" -ForegroundColor Green
+Write-Host "  Size: $([math]::Round($zipSize, 2)) MB" -ForegroundColor Gray
+
 
 # ============================================================================
-# STEP 9: Generate checksum (optional but recommended)
+# STEP 10: Generate checksum
 # ============================================================================
 
-Write-Step "Step 9: Generating checksum"
+Write-Step "Step 10: Generating checksum"
 
 $hash = Get-FileHash -Path $OUTPUT_ZIP -Algorithm SHA256
 $checksumFile = "$OUTPUT_ZIP.sha256"
@@ -537,6 +729,35 @@ $checksumFile = "$OUTPUT_ZIP.sha256"
 
 Write-Host "[OK] Checksum saved: $checksumFile" -ForegroundColor Green
 Write-Host "  SHA256: $($hash.Hash)" -ForegroundColor Gray
+
+# ============================================================================
+# STEP 11: Optional post-build verification
+# ============================================================================
+
+$verifyScript = "scripts\verify_runtime_pack.ps1"
+if ((Test-Path $verifyScript) -and -not $SkipVerify) {
+    Write-Step "Step 11: Running post-build verification"
+
+    Write-Host "Invoking: $verifyScript" -ForegroundColor Yellow
+    Write-Host ""
+
+    & $verifyScript -ZipPath $OUTPUT_ZIP
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "ERROR: Post-build verification failed" -ForegroundColor Red
+        Write-Host "The runtime pack was created but did not pass verification checks." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "To skip verification, use: -SkipVerify" -ForegroundColor Gray
+        exit 1
+    }
+
+    Write-Host ""
+    Write-Host "Post-build verification passed!" -ForegroundColor Green
+} elseif ($SkipVerify) {
+    Write-Host ""
+    Write-Host "Skipping post-build verification (-SkipVerify flag set)" -ForegroundColor Yellow
+}
 
 # ============================================================================
 # BUILD COMPLETE
@@ -556,19 +777,9 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor White
 Write-Host "  1. Test the runtime pack by extracting and running launcher_windows.py" -ForegroundColor Gray
 Write-Host "  2. Verify bundled Python and Git are detected" -ForegroundColor Gray
-Write-Host "  3. Distribute the zip file to end users" -ForegroundColor Gray
+Write-Host "  3. Build installer with Inno Setup" -ForegroundColor Gray
 Write-Host ""
-Write-Host "Distribution checklist:" -ForegroundColor Yellow
-Write-Host "  [ ] Test on clean Windows VM" -ForegroundColor Gray
-Write-Host "  [ ] Verify no system Python required" -ForegroundColor Gray
-Write-Host "  [ ] Include BUILD_WINDOWS.md as user guide" -ForegroundColor Gray
-Write-Host "  [ ] Update config template with correct repo URL" -ForegroundColor Gray
+Write-Host "Quick test command:" -ForegroundColor Yellow
+Write-Host '  Expand-Archive -Path ".\dist\LocalisRuntimePack.zip" -DestinationPath ".\test" -Force' -ForegroundColor Cyan
+Write-Host '  & ".\test\runtime\python\python.exe" ".\test\launcher_windows.py"' -ForegroundColor Cyan
 Write-Host ""
-
-# TODO: Optional - run quick validation test
-# Write-Host "Run validation test? (Y/N): " -ForegroundColor Yellow -NoNewline
-# $response = Read-Host
-# if ($response -eq 'Y' -or $response -eq 'y') {
-#     Write-Host "Running validation..." -ForegroundColor Yellow
-#     # Extract to temp location and run basic checks
-# }

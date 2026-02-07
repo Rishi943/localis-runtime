@@ -1,7 +1,0 @@
-{
-  "app_repo_url": "https://github.com/yourusername/localis.git",
-  "app_branch": "release",
-  "host": "127.0.0.1",
-  "port": 8000,
-  "install_root": "C:\\Users\\YourUsername\\AppData\\Local\\Localis"
-}
